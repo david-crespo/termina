@@ -138,6 +138,17 @@ impl UnixTerminal {
     /// termios state is captured so [`Terminal::enter_cooked_mode`] and `Drop` can restore it.
     pub fn new() -> io::Result<Self> {
         let (read, write) = open_pty()?;
+        Self::from_parts(read, write)
+    }
+
+    /// Uses `tty`, a file descriptor for a terminal this process didn't necessarily open itself,
+    /// such as one received from another process, for both input and output.
+    pub fn from_fd(tty: OwnedFd) -> io::Result<Self> {
+        let read = FileDescriptor::Owned(tty.try_clone()?);
+        Self::from_parts(read, FileDescriptor::Owned(tty))
+    }
+
+    fn from_parts(read: FileDescriptor, write: FileDescriptor) -> io::Result<Self> {
         let source = UnixEventSource::new(read, write.try_clone()?)?;
         let original_termios = termios::tcgetattr(&write)?;
         let reader = EventReader::new(source);
@@ -221,11 +232,16 @@ impl Terminal for UnixTerminal {
 
     fn set_panic_hook(&mut self, f: impl Fn(&mut FileDescriptor) + Send + Sync + 'static) {
         let original_termios = self.original_termios.clone();
+        // Restore this terminal, which isn't necessarily the process's own.
+        let write = self.write.get_ref().try_clone();
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if let Ok((_read, mut write)) = open_pty() {
-                f(&mut write);
-                let _ = termios::tcsetattr(write, termios::OptionalActions::Now, &original_termios);
+            if let Ok(write) = &write {
+                if let Ok(mut write) = write.try_clone() {
+                    f(&mut write);
+                    let _ =
+                        termios::tcsetattr(write, termios::OptionalActions::Now, &original_termios);
+                }
             }
             hook(info);
         }));
