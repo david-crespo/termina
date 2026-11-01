@@ -128,6 +128,9 @@ pub struct UnixTerminal {
     write: BufWriter<FileDescriptor>,
     /// The termios of the PTY's writer detected during `Self::new`.
     original_termios: Termios,
+    /// Whether we've put the terminal in raw mode, so `Drop` knows whether to restore it. A
+    /// terminal another process is using in the meantime must be left alone.
+    raw: bool,
     has_panic_hook: bool,
 }
 
@@ -157,6 +160,7 @@ impl UnixTerminal {
             reader,
             write: BufWriter::with_capacity(BUF_SIZE, write),
             original_termios,
+            raw: false,
             has_panic_hook: false,
         })
     }
@@ -171,6 +175,7 @@ impl Terminal for UnixTerminal {
             termios::OptionalActions::Flush,
             &termios,
         )?;
+        self.raw = true;
 
         Ok(())
     }
@@ -181,6 +186,7 @@ impl Terminal for UnixTerminal {
             termios::OptionalActions::Now,
             &self.original_termios,
         )?;
+        self.raw = false;
         Ok(())
     }
 
@@ -251,7 +257,7 @@ impl Terminal for UnixTerminal {
 
 impl Drop for UnixTerminal {
     fn drop(&mut self) {
-        if !self.has_panic_hook || !std::thread::panicking() {
+        if self.raw && (!self.has_panic_hook || !std::thread::panicking()) {
             let _ = self.flush();
             let _ = self.enter_cooked_mode();
         }
